@@ -18,7 +18,40 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
-  <script src="config.js"></script>
+  <script>
+  // Boot watchdog: if the app hasn't started after a few seconds, say why instead of spinning forever.
+  (function () {
+    var errs = [];
+    window.addEventListener('error', function (e) {
+      var t = e.target;
+      if (t && t !== window && (t.src || t.href)) errs.push('Could not load ' + String(t.src || t.href).split('/').slice(-2).join('/'));
+      else if (e.message) errs.push(e.message + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason; errs.push(String((r && (r.code || r.message)) || r));
+    });
+    function show(title, body) {
+      if (window.__splitlahBooted) return;
+      var app = document.getElementById('app');
+      if (!app) return;
+      app.innerHTML = '<div class="brand">Split<span>Lah</span></div><div class="banner warn"><span>⚠️</span><div><b>' + title + '</b><br>' + body +
+        (errs.length ? '<br><br><small style="word-break:break-word">Details: ' + errs.slice(0, 4).map(function (x) { return x.replace(/[<>&]/g, ''); }).join(' · ') + '</small>' : '') +
+        '</div></div><button class="btn primary block" onclick="location.reload()">Try again</button>';
+    }
+    if (location.protocol === 'file:') {
+      document.addEventListener('DOMContentLoaded', function () {
+        show('This needs to be opened from a website, not a file.',
+          'Browsers block apps like this when you double-click <code>index.html</code>. Upload the whole folder to Netlify (drag it onto <b>app.netlify.com/drop</b>) and open the <b>https://</b> link it gives you. See README step 2.');
+      });
+      return;
+    }
+    setTimeout(function () {
+      show('SplitLah is taking too long to start.',
+        'Check your internet connection. If you just set up Firebase, check that <b>config.js</b> has your keys and that <b>Anonymous</b> sign-in is enabled.');
+    }, 15000);
+  })();
+  </script>
+  <script src="config.js" onerror="void 0"></script>
 </head>
 <body>
   <main id="app" aria-live="polite">
