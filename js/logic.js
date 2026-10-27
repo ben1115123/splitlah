@@ -167,9 +167,22 @@ export function convertMinor(minor, from, to, rate) {
  * Build the stored form of an expense: shares converted to the group's base currency,
  * re-allocated so that base shares always sum exactly to the base total.
  */
-export function buildExpenseAmounts({ amount, currency, rate, baseCurrency, ids, splitType, splitInput }) {
+export function buildExpenseAmounts({ amount, currency, rate, baseCurrency, ids, splitType, splitInput, payers }) {
   const r = computeSplit(amount, ids, splitType, splitInput);
   if (!r.ok) return r;
+  // Several people paid: amounts (expense currency) must be on the same side as the total and add up to it.
+  let payerIds = null;
+  if (payers) {
+    payerIds = Object.keys(payers).filter((id) => payers[id]);
+    let sum = 0;
+    for (const id of payerIds) {
+      const v = payers[id];
+      if (!Number.isSafeInteger(v) || Math.sign(v) !== Math.sign(amount)) return { ok: false, payerError: true, error: 'Check who paid what' };
+      sum += v;
+    }
+    if (!payerIds.length) return { ok: false, payerError: true, error: 'Enter who paid what' };
+    if (sum !== amount) return { ok: false, payerError: true, error: sum < amount ? 'left to assign to payers' : 'over the total (payers)', diff: amount - sum };
+  }
   const baseTotal = convertMinor(amount, currency, baseCurrency, currency === baseCurrency ? 1 : rate);
   if (baseTotal === 0) return { ok: false, error: 'Amount too small after conversion' };
   const weights = ids.map((id) => Math.abs(r.shares[id]));
@@ -186,8 +199,22 @@ export function buildExpenseAmounts({ amount, currency, rate, baseCurrency, ids,
   }
   const sharesBase = {};
   ids.forEach((id, i) => (sharesBase[id] = baseShares[i]));
-  return { ok: true, shares: r.shares, sharesBase, baseTotal };
+  const out = { ok: true, shares: r.shares, sharesBase, baseTotal };
+  if (payerIds) {
+    // convert each payer's amount, re-allocated so they add up exactly to the base total
+    const pb = allocate(baseTotal, payerIds.map((id) => Math.abs(payers[id])));
+    out.payers = Object.fromEntries(payerIds.map((id) => [id, payers[id]]));
+    out.paidBase = Object.fromEntries(payerIds.map((id, i) => [id, pb[i]]));
+  }
+  return out;
 }
+
+/** Who paid how much of an expense, in base minor units. Supports single- and multi-payer expenses. */
+export function paidMap(e) {
+  if (e.paidBase && Object.keys(e.paidBase).length) return e.paidBase;
+  return { [e.paidBy]: e.baseTotal };
+}
+export const payerIds = (e) => Object.keys(paidMap(e)).filter((id) => paidMap(e)[id]);
 
 /** Net balance per member in base minor units. Positive = is owed money, negative = owes. */
 export function computeNet(memberIds, expenses) {
@@ -199,7 +226,7 @@ export function computeNet(memberIds, expenses) {
       bump(e.from, e.baseTotal);
       bump(e.to, -e.baseTotal);
     } else {
-      bump(e.paidBy, e.baseTotal);
+      for (const [id, v] of Object.entries(paidMap(e))) bump(id, v);
       for (const [id, v] of Object.entries(e.sharesBase || {})) bump(id, -v);
     }
   }
@@ -216,7 +243,13 @@ export function computePairwise(expenses) {
   for (const e of expenses) {
     if (e.deleted) continue;
     if (e.type === 'payment') add(e.to, e.from, e.baseTotal); // payment from A to B reduces A's debt to B
-    else for (const [id, v] of Object.entries(e.sharesBase || {})) add(id, e.paidBy, v);
+    else {
+      // Within one expense: everyone's paid minus share, then debtors pay creditors (exact for one payer).
+      const n = {};
+      for (const [id, v] of Object.entries(paidMap(e))) n[id] = (n[id] ?? 0) + v;
+      for (const [id, v] of Object.entries(e.sharesBase || {})) n[id] = (n[id] ?? 0) - v;
+      for (const t of simplifyDebts(n)) add(t.from, t.to, t.amount);
+    }
   }
   const res = [];
   const seen = new Set();
@@ -265,7 +298,7 @@ export function computeStats(memberIds, expenses) {
   for (const e of expenses) {
     if (e.deleted || e.type === 'payment') continue;
     total += e.baseTotal;
-    paid[e.paidBy] = (paid[e.paidBy] ?? 0) + e.baseTotal;
+    for (const [id, v] of Object.entries(paidMap(e))) paid[id] = (paid[id] ?? 0) + v;
     for (const [id, v] of Object.entries(e.sharesBase || {})) share[id] = (share[id] ?? 0) + v;
     byCat[e.category || 'general'] = (byCat[e.category || 'general'] ?? 0) + e.baseTotal;
   }
@@ -278,7 +311,7 @@ export function involvedMembers(expenses) {
   for (const e of expenses) {
     if (e.deleted) continue;
     if (e.type === 'payment') { s.add(e.from); s.add(e.to); }
-    else { s.add(e.paidBy); Object.keys(e.sharesBase || {}).forEach((id) => s.add(id)); }
+    else { Object.keys(paidMap(e)).forEach((id) => s.add(id)); Object.keys(e.sharesBase || {}).forEach((id) => s.add(id)); }
   }
   return s;
 }

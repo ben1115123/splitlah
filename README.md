@@ -5,7 +5,7 @@ A home-screen web app (PWA) for splitting costs with friends. One group per trip
 ## What it does
 
 - **Groups for every trip/occasion.** Each has its own people, main currency, and history. Archive a group when the trip's over; it stays readable.
-- **Add expenses** with who paid, date, category (auto-guessed from the description: "Grab to airport" → Transport), and notes.
+- **Add expenses** with who paid (one person, or **several people**, e.g. Ben paid RM600 and Amy RM300 of the villa), date, category (auto-guessed from the description: "Grab to airport" → Transport), and notes.
 - **Five split methods:** Equal · Exact amounts · Percentages · Shares (e.g. 2 for a double portion) · Adjustment (equal, plus extra for someone's drink).
 - **Multi-currency.** Log in THB/JPY/SGD/etc.; it converts to the group's main currency at a rate you can type or fetch ("Get today's rate"). The rate is saved per group, so the next THB expense pre-fills it.
 - **Balances + Settle up.** "Simplify" shows the fewest transfers that square everyone up; turn it off to see who owes whom directly. Tap **Record** to log a payment.

@@ -1,7 +1,7 @@
 import * as L from './logic.js';
 import { createStore, newId } from './store.js';
 
-const VERSION = '1.0.1';
+const VERSION = '1.1.0';
 const $ = (s, r = document) => r.querySelector(s);
 const app = $('#app');
 const sheetRoot = $('#sheet-root');
@@ -453,11 +453,17 @@ function heroHTML() {
   </div>`;
 }
 
+function payerLabel(e) {
+  const ids = L.payerIds(e);
+  if (ids.length <= 1) return youOr(ids[0] ?? e.paidBy, true);
+  const names = ids.map((id) => youOr(id, true)).sort((a, b) => (a === 'You' ? -1 : b === 'You' ? 1 : 0));
+  return ids.length === 2 ? `${names[0]} & ${names[1]}` : `${names[0]} + ${ids.length - 1} others`;
+}
 function activityHTML() {
   const me = myId(); const cur = S.group.currency;
   const q = S.search.trim().toLowerCase();
   let list = S.expenses.filter((e) => S.showDeleted || !e.deleted);
-  if (q) list = list.filter((e) => (e.type === 'payment' ? ['settlement', e.notes, nameOf(e.from), nameOf(e.to)] : [e.desc, e.notes, nameOf(e.paidBy), CATS[e.category]?.[1]]).join(' ').toLowerCase().includes(q));
+  if (q) list = list.filter((e) => (e.type === 'payment' ? ['settlement', e.notes, nameOf(e.from), nameOf(e.to)] : [e.desc, e.notes, ...L.payerIds(e).map((id) => nameOf(id)), CATS[e.category]?.[1]]).join(' ').toLowerCase().includes(q));
   list.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt ?? 0) - (a.createdAt ?? 0));
   const deletedCount = S.expenses.filter((e) => e.deleted).length;
   if (!list.length) {
@@ -474,16 +480,16 @@ function activityHTML() {
       continue;
     }
     const myShare = e.sharesBase?.[me] ?? 0;
+    const myPaid = L.paidMap(e)[me] ?? 0;
+    const myNet = myPaid - myShare;
     let rel;
-    if (e.paidBy === me) {
-      const lent = e.baseTotal - myShare;
-      rel = lent ? `<div class="small">you lent</div><div class="num bal-pos" style="font-weight:700">${money(lent, cur)}</div>` : '<div class="small">just you</div>';
-    } else if (myShare) {
-      rel = `<div class="small">you borrowed</div><div class="num bal-neg" style="font-weight:700">${money(myShare, cur)}</div>`;
-    } else rel = '<div class="small" style="color:var(--faint)">not involved</div>';
+    if (!myPaid && !myShare) rel = '<div class="small" style="color:var(--faint)">not involved</div>';
+    else if (myNet > 0) rel = `<div class="small">you lent</div><div class="num bal-pos" style="font-weight:700">${money(myNet, cur)}</div>`;
+    else if (myNet < 0) rel = `<div class="small">you borrowed</div><div class="num bal-neg" style="font-weight:700">${money(-myNet, cur)}</div>`;
+    else rel = `<div class="small">${myPaid === e.baseTotal ? 'just you' : 'you’re even'}</div>`;
     const foreign = e.currency !== cur ? ` · ${money(e.amount, e.currency)}` : '';
     out += `<button class="row ${e.deleted ? 'deleted' : ''}" data-act="exp" data-id="${esc(e.id)}"><span class="cat">${(CATS[e.category] || CATS.general)[0]}</span>
-      <span class="grow"><div class="title">${esc(e.desc || 'Expense')}</div><div class="small num">${esc(youOr(e.paidBy, true))} paid ${money(e.baseTotal, cur)}${foreign}</div></span>
+      <span class="grow"><div class="title">${esc(e.desc || 'Expense')}</div><div class="small num">${esc(payerLabel(e))} paid ${money(e.baseTotal, cur)}${foreign}</div></span>
       <span class="right">${rel}</span></button>`;
   }
   if (deletedCount) out += `<div style="text-align:center;margin-top:10px"><button class="link-btn" data-act="toggleDeleted">${S.showDeleted ? 'Hide' : 'Show'} ${deletedCount} deleted</button></div>`;
@@ -624,11 +630,14 @@ function renderExpenseForm(eid) {
   const f = editing ? {
     desc: editing.desc, amountStr: L.minorToInput(editing.amount, editing.currency), currency: editing.currency,
     rateStr: editing.currency !== base ? String(editing.rate) : '', paidBy: editing.paidBy, date: editing.date,
+    multi: Object.keys(editing.payers || {}).length > 1,
+    payIn: Object.fromEntries(Object.entries(editing.payers || {}).map(([id, v]) => [id, L.minorToInput(v, editing.currency)])),
     category: editing.category || 'general', catTouched: true, splitType: editing.splitType || 'equal',
     picked: new Set(editing.participants || Object.keys(editing.sharesBase || {})), inputs: { exact: {}, percent: {}, shares: {}, adjust: {} }, notes: editing.notes || '',
   } : {
     desc: '', amountStr: '', currency: lastCur && L.CURRENCIES[lastCur] ? lastCur : base, rateStr: '', paidBy: me && g.members[me] ? me : ms[0]?.id,
     date: today(), category: 'general', catTouched: false, splitType: 'equal', picked: new Set(ms.map((m) => m.id)),
+    multi: false, payIn: {},
     inputs: { exact: {}, percent: {}, shares: {}, adjust: {} }, notes: '',
   };
   if (editing && editing.splitInput && f.inputs[f.splitType]) {
@@ -642,6 +651,23 @@ function renderExpenseForm(eid) {
   const rowsFor = () => {
     const extra = editing ? [...f.picked].filter((id) => !g.members[id]).map((id) => ({ id, name: 'Removed member' })) : [];
     return [...ms, ...extra];
+  };
+  const payRows = () => {
+    const extra = Object.keys(f.payIn).filter((id) => !g.members[id] && f.payIn[id]).map((id) => ({ id, name: 'Removed member' }));
+    return [...ms, ...extra];
+  };
+  // Several payers: parse amounts and compare with the total
+  const payerCheck = () => {
+    const amount = L.toMinor(f.amountStr, f.currency);
+    const map = {}; let sum = 0; let bad = false;
+    for (const m of payRows()) {
+      const raw = f.payIn[m.id];
+      if (!raw) continue;
+      const v = L.toMinor(raw, f.currency);
+      if (Number.isNaN(v) || v < 0) { bad = true; continue; }
+      if (v) { map[m.id] = v; sum += v; }
+    }
+    return { map, sum, bad, amount, diff: Number.isFinite(amount) ? amount - sum : null };
   };
 
   const compute = () => {
@@ -663,7 +689,13 @@ function renderExpenseForm(eid) {
     const rate = f.currency === base ? 1 : Number(f.rateStr);
     if (!Number.isFinite(amount) || amount === 0) return { ok: false, error: 'Enter an amount', amount, ids, input };
     if (f.currency !== base && !(rate > 0)) return { ok: false, error: `Enter the ${f.currency}→${base} rate`, amount, ids, input };
-    const r = L.buildExpenseAmounts({ amount, currency: f.currency, rate, baseCurrency: base, ids, splitType: t, splitInput: input });
+    let payers;
+    if (f.multi) {
+      const pc = payerCheck();
+      if (pc.bad) return { ok: false, payerError: true, error: 'Check who paid what', amount, ids, input };
+      payers = pc.map;
+    }
+    const r = L.buildExpenseAmounts({ amount, currency: f.currency, rate, baseCurrency: base, ids, splitType: t, splitInput: input, payers });
     return { ...r, amount, ids, input, rate };
   };
 
@@ -693,22 +725,44 @@ function renderExpenseForm(eid) {
       if (v == null || v === 0) { el.textContent = f.splitType === 'equal' && !f.picked.has(id) ? 'not included' : ''; return; }
       el.textContent = money(v, cur) + (cur !== base ? ` ≈ ${money(r.sharesBase[id], base)}` : '');
     });
+    refreshPay();
     // status
     const st = $('#split-status');
     let msg = '', cls = 'ok';
-    if (r.ok) {
+    if (r.payerError) {
+      msg = 'Fix who paid what above'; cls = 'err';
+    } else if (r.ok) {
       msg = `✓ ${money(r.amount, cur)} split between ${Object.values(r.shares).filter((v) => v).length}`;
     } else if (r.diff != null && Number.isFinite(r.amount)) {
       cls = 'err';
       msg = f.splitType === 'percent' ? `${Math.abs(r.diff)}${r.error}` : `${money(Math.abs(r.diff), cur)} ${r.error}`;
     } else { cls = 'err'; msg = r.error || ''; }
-    st.innerHTML = `<span class="${cls}">${esc(msg)}</span>${f.splitType !== 'equal' && f.splitType !== 'adjust' && r.diff ? '<button class="link-btn" data-act="fill">Fill rest</button>' : ''}`;
+    st.innerHTML = `<span class="${cls}">${esc(msg)}</span>${!r.payerError && f.splitType !== 'equal' && f.splitType !== 'adjust' && r.diff ? '<button class="link-btn" data-act="fill">Fill rest</button>' : ''}`;
     // conversion line
     const conv = $('#conv');
     if (conv) conv.textContent = r.baseTotal ? `= ${money(r.baseTotal, base)} in ${base}` : '';
-    $('#save').disabled = !r.ok || !f.desc.trim() || !f.paidBy;
+    $('#save').disabled = !r.ok || !f.desc.trim() || (!f.multi && !f.paidBy);
     return r;
   };
+
+  const payerChipsHTML = () => `${ms.map((m) => `<button type="button" class="chip" data-act="payer" data-id="${esc(m.id)}" aria-pressed="${!f.multi && f.paidBy === m.id}">${avatar(m.id, m.name, 'sm')}${esc(m.id === me ? 'You' : m.name)}</button>`).join('')}
+        <button type="button" class="chip" data-act="multi" aria-pressed="${f.multi}">👥 Multiple people</button>`;
+  const payBoxHTML = () => !f.multi ? '' : `
+      <p class="hint">Type how much each person paid. Leave blank if they didn’t pay.</p>
+      <div class="card" style="padding:4px 14px;margin-top:8px">${payRows().map((m) => `<div class="split-row">${avatar(m.id, m.name, 'sm')}<span class="grow">${esc(m.name)}${m.id === me ? ' (you)' : ''}</span>
+        <input class="input mini num" inputmode="decimal" placeholder="0" data-in="paid" data-id="${esc(m.id)}" value="${esc(f.payIn[m.id] ?? '')}" aria-label="${esc(m.name)} paid"></div>`).join('')}</div>
+      <div class="split-status" id="pay-status"></div>`;
+  const refreshPay = () => {
+    const st = $('#pay-status'); if (!st) return;
+    const pc = payerCheck();
+    let msg, cls = 'ok', fillBtn = '';
+    if (pc.bad) { msg = 'Amounts can’t be negative'; cls = 'err'; }
+    else if (!Number.isFinite(pc.amount) || !pc.amount) { msg = 'Enter the total amount first'; cls = 'err'; }
+    else if (pc.diff === 0) msg = `✓ ${Object.keys(pc.map).length} people paid ${money(pc.amount, f.currency)}`;
+    else { cls = 'err'; msg = `${money(Math.abs(pc.diff), f.currency)} ${pc.diff > 0 ? 'left to assign' : 'over the total'}`; fillBtn = '<button class="link-btn" data-act="fillPay">Fill rest</button>'; }
+    st.innerHTML = `<span class="${cls}">${esc(msg)}</span>${fillBtn}`;
+  };
+  const redrawPayers = () => { $('#payer-chips').innerHTML = payerChipsHTML(); $('#pay-box').innerHTML = payBoxHTML(); refresh(); };
 
   const rateBoxHTML = () => f.currency === base ? '' : `
     <div class="field" id="rate-field"><label for="rate">Exchange rate</label>
@@ -726,8 +780,8 @@ function renderExpenseForm(eid) {
         <select class="input" data-in="currency" aria-label="Currency">${Object.keys(L.CURRENCIES).map((c) => `<option ${c === f.currency ? 'selected' : ''}>${c}</option>`).join('')}</select>
         <input id="amt" class="input amount-input num" inputmode="decimal" placeholder="0.00" data-in="amount" value="${esc(f.amountStr)}" autocomplete="off"></div></div>
       <div id="rate-box">${rateBoxHTML()}</div>
-      <div class="field"><div class="label">Paid by</div><div class="chips scroll">
-        ${ms.map((m) => `<button type="button" class="chip" data-act="payer" data-id="${esc(m.id)}" aria-pressed="${f.paidBy === m.id}">${avatar(m.id, m.name, 'sm')}${esc(m.id === me ? 'You' : m.name)}</button>`).join('')}</div></div>
+      <div class="field"><div class="label">Paid by</div><div class="chips scroll" id="payer-chips">${payerChipsHTML()}</div>
+        <div id="pay-box">${payBoxHTML()}</div></div>
       <div class="field"><div class="label">Split</div>
         <div class="seg" role="group">${Object.entries({ equal: 'Equal', exact: 'Exact', percent: '%', shares: 'Shares', adjust: '+/−' }).map(([k, v]) => `<button type="button" data-act="stype" data-t="${k}" aria-pressed="${f.splitType === k}" aria-label="${L.SPLIT_TYPES[k]}">${v}</button>`).join('')}</div>
         <p class="hint" id="split-hint"></p>
@@ -763,6 +817,7 @@ function renderExpenseForm(eid) {
     } else if (k === 'amount') { f.amountStr = el.value; refresh(); }
     else if (k === 'rate') { f.rateStr = el.value; refresh(); }
     else if (k === 'split') { f.inputs[f.splitType][el.dataset.id] = el.value; refresh(); }
+    else if (k === 'paid') { f.payIn[el.dataset.id] = el.value; refresh(); }
     else if (k === 'date') f.date = el.value;
     else if (k === 'notes') f.notes = el.value;
   });
@@ -770,7 +825,12 @@ function renderExpenseForm(eid) {
     if (k === 'currency') {
       const old = f.currency; f.currency = el.value;
       // keep typed amounts meaningful when dp changes (e.g. MYR -> JPY)
-      if (L.dpOf(old) !== L.dpOf(f.currency)) for (const t of ['exact', 'adjust']) for (const id in f.inputs[t]) { const v = L.toMinor(f.inputs[t][id], old); if (!Number.isNaN(v)) f.inputs[t][id] = L.minorToInput(Math.round(v * 10 ** (L.dpOf(f.currency) - L.dpOf(old))), f.currency); }
+      const conv = (str) => { const v = L.toMinor(str, old); return Number.isNaN(v) ? str : L.minorToInput(Math.round(v * 10 ** (L.dpOf(f.currency) - L.dpOf(old))), f.currency); };
+      if (L.dpOf(old) !== L.dpOf(f.currency)) {
+        for (const t of ['exact', 'adjust']) for (const id in f.inputs[t]) f.inputs[t][id] = conv(f.inputs[t][id]);
+        for (const id in f.payIn) if (f.payIn[id]) f.payIn[id] = conv(f.payIn[id]);
+        if (f.multi) $('#pay-box').innerHTML = payBoxHTML();
+      }
       f.rateStr = f.currency !== base && g.rates?.[f.currency] ? String(g.rates[f.currency]) : '';
       $('#rate-box').innerHTML = rateBoxHTML();
       redrawSplit();
@@ -792,7 +852,30 @@ function renderExpenseForm(eid) {
 
   PAGE = {
     cancel: () => back(editing ? `#/g/${S.gid}/e/${eid}` : `#/g/${S.gid}`),
-    payer: (el) => { f.paidBy = el.dataset.id; app.querySelectorAll('[data-act="payer"]').forEach((b) => b.setAttribute('aria-pressed', b === el)); refresh(); },
+    payer: (el) => {
+      f.paidBy = el.dataset.id;
+      if (f.multi) { f.multi = false; redrawPayers(); return; }
+      app.querySelectorAll('[data-act="payer"]').forEach((b) => b.setAttribute('aria-pressed', b === el)); refresh();
+    },
+    multi: () => {
+      if (f.multi) return;
+      f.multi = true;
+      // start from the current single payer covering the whole amount
+      if (!Object.values(f.payIn).some((v) => v)) {
+        const amt = L.toMinor(f.amountStr, f.currency);
+        if (f.paidBy && Number.isFinite(amt) && amt > 0) f.payIn = { [f.paidBy]: L.minorToInput(amt, f.currency) };
+      }
+      redrawPayers();
+      setTimeout(() => app.querySelector('[data-in="paid"]:placeholder-shown')?.focus(), 50);
+    },
+    fillPay: () => {
+      const pc = payerCheck(); if (!pc.diff) return;
+      const rows = payRows();
+      const target = rows.find((m) => !f.payIn[m.id]) || rows.at(-1);
+      const cur0 = L.toMinor(f.payIn[target.id] || '0', f.currency) || 0;
+      f.payIn[target.id] = L.minorToInput(Math.max(0, cur0 + pc.diff), f.currency);
+      $('#pay-box').innerHTML = payBoxHTML(); refresh();
+    },
     stype: (el) => {
       const prev = f.splitType; f.splitType = el.dataset.t;
       app.querySelectorAll('[data-act="stype"]').forEach((b) => b.setAttribute('aria-pressed', b === el));
@@ -838,11 +921,18 @@ function renderExpenseForm(eid) {
       el.disabled = true;
       const now = Date.now();
       const splitInput = f.splitType === 'equal' ? {} : Object.fromEntries(Object.entries(r.input).filter(([, v]) => v !== 0 && !Number.isNaN(v)));
+      // several payers: biggest one is the "main" payer; a single filled-in payer is saved as a normal expense
+      let paidBy = f.paidBy, payerFields = {};
+      if (f.multi && r.payers) {
+        const ids = Object.keys(r.payers);
+        paidBy = ids.reduce((a, b) => (r.payers[b] > r.payers[a] ? b : a));
+        if (ids.length > 1) payerFields = { payers: r.payers, paidBase: r.paidBase };
+      }
       const doc = {
         id: editing ? editing.id : newId(),
         type: 'expense', desc: f.desc.trim(), category: f.category, notes: f.notes.trim(),
         amount: r.amount, currency: f.currency, rate: f.currency === base ? 1 : r.rate, baseCurrency: base,
-        paidBy: f.paidBy, date: f.date || today(),
+        paidBy, ...payerFields, date: f.date || today(),
         splitType: f.splitType, splitInput, participants: r.ids,
         shares: r.shares, sharesBase: r.sharesBase, baseTotal: r.baseTotal,
         createdBy: editing ? editing.createdBy ?? null : me ?? null, createdAt: editing ? editing.createdAt : now,
@@ -908,13 +998,15 @@ function renderExpenseDetail(eid, isLive = false) {
       <div style="display:flex;align-items:center;gap:10px">${avatar(e.from, nameOf(e.from))}<b>${who(e.from)}</b><span style="color:var(--faint)">${ICON.arrow}</span>${avatar(e.to, nameOf(e.to))}<b>${who(e.to)}</b></div>
       ${e.notes ? `<p class="hint" style="margin-top:12px">${esc(e.notes)}</p>` : ''}</div>`;
   } else {
-    const shareRows = Object.entries(e.sharesBase || {}).filter(([, v]) => v).map(([id, v]) => `<div class="kv"><span>${avatar(id, nameOf(id), 'sm')} &nbsp;${who(id)}</span>
+    const shareRows = Object.entries(e.sharesBase || {}).filter(([, v]) => v).map(([id, v]) => `<div class="kv"><span style="display:flex;align-items:center;gap:10px">${avatar(id, nameOf(id), 'sm')}${who(id)}</span>
       <span class="num"><b>${money(v, base)}</b>${e.currency !== base ? `<br><span class="small" style="color:var(--muted)">${money(e.shares?.[id] ?? 0, e.currency)}</span>` : ''}</span></div>`).join('');
     body = `<div class="card hero"><div class="label">${(CATS[e.category] || CATS.general)[0]} ${(CATS[e.category] || CATS.general)[1]} · ${esc(fmtDate(e.date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }))}</div>
       <div style="font:700 22px var(--display);margin:4px 0 2px">${esc(e.desc)}</div>
       <div class="big num">${money(e.amount, e.currency)}</div>
       ${e.currency !== base ? `<div class="hint num">= ${money(e.baseTotal, base)} at 1 ${esc(e.currency)} = ${e.rate} ${esc(base)}</div>` : ''}
-      <div style="display:flex;align-items:center;gap:10px;margin-top:10px">${avatar(e.paidBy, nameOf(e.paidBy))}<span><b>${who(e.paidBy)}</b> paid</span></div></div>
+      ${L.payerIds(e).length > 1
+    ? `<div style="margin-top:10px">${L.payerIds(e).map((id) => `<div style="display:flex;align-items:center;gap:10px;padding:3px 0">${avatar(id, nameOf(id), 'sm')}<span style="flex:1"><b>${who(id)}</b> paid</span><span class="num"><b>${money(e.payers?.[id] ?? 0, e.currency)}</b></span></div>`).join('')}</div>`
+    : `<div style="display:flex;align-items:center;gap:10px;margin-top:10px">${avatar(e.paidBy, nameOf(e.paidBy))}<span><b>${who(e.paidBy)}</b> paid</span></div>`}</div>
       <div class="section-title"><span>Split ${esc((L.SPLIT_TYPES[e.splitType] || '').toLowerCase())}</span></div>
       <div class="card">${shareRows}</div>
       ${e.notes ? `<div class="section-title">Notes</div><div class="card" style="white-space:pre-wrap">${esc(e.notes)}</div>` : ''}`;
@@ -1074,7 +1166,8 @@ function exportCSV() {
   const head = ['Date', 'Description', 'Category', 'Type', 'Paid by / From', 'To', 'Amount', 'Currency', 'Rate', `Amount (${base})`, ...ms.map((m) => `${m.name} share (${base})`), 'Notes'];
   const rows = live().sort((a, b) => (a.date || '').localeCompare(b.date || '')).map((e) => e.type === 'payment'
     ? [e.date, 'Settlement', '', 'Payment', nameOf(e.from), nameOf(e.to), num(e.amount, base), base, 1, num(e.baseTotal, base), ...ms.map(() => ''), e.notes]
-    : [e.date, e.desc, (CATS[e.category] || CATS.general)[1], 'Expense', nameOf(e.paidBy), '', num(e.amount, e.currency), e.currency, e.rate, num(e.baseTotal, base),
+    : [e.date, e.desc, (CATS[e.category] || CATS.general)[1], 'Expense',
+      L.payerIds(e).length > 1 ? L.payerIds(e).map((id) => `${nameOf(id)} ${num(e.payers?.[id] ?? 0, e.currency)}`).join('; ') : nameOf(e.paidBy), '', num(e.amount, e.currency), e.currency, e.rate, num(e.baseTotal, base),
       ...ms.map((m) => (e.sharesBase?.[m.id] ? num(e.sharesBase[m.id], base) : '')), e.notes]);
   const { net } = groupNumbers();
   rows.push([], ['Balances'], ...ms.map((m) => ['', m.name, '', net[m.id] >= 0 ? 'gets back' : 'owes', '', '', '', '', '', num(Math.abs(net[m.id]), base)]));

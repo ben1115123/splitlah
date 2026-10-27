@@ -1,6 +1,6 @@
 // SplitLah service worker: makes the app open instantly and work offline.
 // Bump VERSION whenever you upload new app files so phones pick up the update.
-const VERSION = 'splitlah-v1.0.1';
+const VERSION = 'splitlah-v1.1.0';
 const SHELL = [
   './', './index.html', './styles.css', './config.js', './manifest.webmanifest',
   './js/app.js', './js/logic.js', './js/store.js',
