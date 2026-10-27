@@ -1,6 +1,6 @@
 // SplitLah service worker: makes the app open instantly and work offline.
 // Bump VERSION whenever you upload new app files so phones pick up the update.
-const VERSION = 'splitlah-v1.1.0';
+const VERSION = 'splitlah-v1.1.1';
 const SHELL = [
   './', './index.html', './styles.css', './config.js', './manifest.webmanifest',
   './js/app.js', './js/logic.js', './js/store.js',
@@ -17,6 +17,7 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
+  if ((req.headers.get('accept') || '').includes('text/event-stream')) return; // live streams are never cached
   const url = new URL(req.url);
 
   // Same-origin app files: network first (fresh code), fall back to cache offline.

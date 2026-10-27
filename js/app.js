@@ -1,7 +1,7 @@
 import * as L from './logic.js';
 import { createStore, newId } from './store.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const $ = (s, r = document) => r.querySelector(s);
 const app = $('#app');
 const sheetRoot = $('#sheet-root');
@@ -503,8 +503,9 @@ function balancesHTML() {
   const settled = ids.every((id) => net[id] === 0);
   const simplify = g.simplify !== false;
   const transfers = settled ? [] : simplify ? L.simplifyDebts(net) : L.computePairwise(S.expenses);
-  const rows = members().map((m) => {
-    const v = net[m.id]; const w = (Math.abs(v) / max) * 50;
+  const extra = Object.keys(net).filter((id) => net[id] && !g.members?.[id]).map((id) => ({ id, name: 'Removed member' }));
+  const rows = [...members(), ...extra].map((m) => {
+    const v = net[m.id]; const w = Math.min(50, (Math.abs(v) / max) * 50);
     return `<div class="bal-row">${avatar(m.id, m.name)}<div class="grow">
       <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(m.name)}${m.id === me ? ' <span class="small" style="color:var(--muted);font-weight:500">(you)</span>' : ''}</b>
       <span class="num ${v > 0 ? 'bal-pos' : v < 0 ? 'bal-neg' : ''}" style="font-weight:700">${v > 0 ? 'gets back ' + money(v, cur) : v < 0 ? 'owes ' + money(-v, cur) : 'settled'}</span></div>
@@ -914,10 +915,29 @@ function renderExpenseForm(eid) {
       else if (t === 'percent') { const cur0 = Number(f.inputs.percent[target.id] || 0); f.inputs.percent[target.id] = String(Math.round((cur0 + r.diff) * 1000) / 1000); }
       redrawSplit();
     },
-    save: (el) => {
+    save: async (el) => {
       const r = refresh();
       if (!r.ok) return toast(r.error || 'Check the split');
       if (!f.desc.trim()) { toast('Add a description'); return $('#desc').focus(); }
+      // Someone may have removed a person from the group while this form was open.
+      const original = new Set(editing ? [...Object.keys(editing.sharesBase || {}), ...Object.keys(editing.paidBase || {}), editing.paidBy] : []);
+      const used = new Set([...Object.keys(r.shares || {}), ...Object.keys(r.payers || {}), ...(f.multi ? [] : [f.paidBy])]);
+      const gone = [...used].filter((id) => !S.group.members?.[id] && !original.has(id));
+      if (gone.length) {
+        gone.forEach((id) => { f.picked.delete(id); delete f.payIn[id]; for (const t in f.inputs) delete f.inputs[t][id]; if (f.paidBy === id) f.paidBy = myId(); });
+        ms.splice(0, ms.length, ...members());
+        draw();
+        return toast('Someone was removed from the group while you were typing — check the split and save again');
+      }
+      // Someone else may have deleted or changed this expense while it was open here.
+      if (editing) {
+        const latest = S.expenses.find((x) => x.id === editing.id);
+        if (!latest || latest.deleted) {
+          if (!(await confirmSheet('This was deleted', `${nameOf(latest?.updatedBy) || 'Someone'} deleted this expense while you were editing it. Save your version and bring it back?`, 'Save & restore'))) return back(`#/g/${S.gid}/e/${eid}`);
+        } else if (latest.updatedAt !== editing.updatedAt && latest.updatedBy !== me) {
+          if (!(await confirmSheet('Changed by someone else', `${nameOf(latest.updatedBy)} changed this expense while you were editing it. Replace their version with yours?`, 'Use my version'))) return back(`#/g/${S.gid}/e/${eid}`);
+        }
+      }
       el.disabled = true;
       const now = Date.now();
       const splitInput = f.splitType === 'equal' ? {} : Object.fromEntries(Object.entries(r.input).filter(([, v]) => v !== 0 && !Number.isNaN(v)));
@@ -1055,8 +1075,15 @@ function renderSettle() {
       app.querySelectorAll('[data-act="to"]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.id === f.to));
       $('#amt').value = f.amountStr; check();
     },
-    save: () => {
+    save: async () => {
       const amt = check(); if (amt == null) return;
+      if (![f.from, f.to].every((id) => S.group.members?.[id] || (editing && [editing.from, editing.to].includes(id)))) return toast('That person was removed from the group');
+      if (editing) {
+        const latest = S.expenses.find((x) => x.id === editing.id);
+        if (!latest || latest.deleted) {
+          if (!(await confirmSheet('This was deleted', 'Someone deleted this payment while you were editing it. Save your version and bring it back?', 'Save & restore'))) return back(`#/g/${S.gid}/e/${editing.id}`);
+        }
+      }
       const now = Date.now();
       S.store.saveExpense(S.gid, {
         id: editing ? editing.id : newId(), type: 'payment', from: f.from, to: f.to,
@@ -1188,7 +1215,7 @@ function exportCSV() {
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); S.installEvt = e; if (S.route.view === 'home') renderHome(); });
 
 async function boot() {
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
   try {
     S.store = await createStore();
     S.store.onWriteError = (e) => fail(e, 'Couldn’t save to the server');
