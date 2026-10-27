@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// SplitLah security rules.
+// Model: a group's 20-character random ID is its invite secret (~119 bits).
+// Anyone with the link can read and write that group; nobody can list or
+// discover groups they don't have the link for. Every request must come from
+// a signed-in (anonymous) app user, so the database is not open to the web.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function str(v, max) { return v is string && v.size() > 0 && v.size() <= max; }
+
+    match /groups/{groupId} {
+      allow get: if signedIn();
+      allow list: if false;                       // no browsing other people's groups
+      allow create: if signedIn()
+        && groupId.size() == 20
+        && str(request.resource.data.name, 60)
+        && str(request.resource.data.currency, 3)
+        && request.resource.data.members is map
+        && request.resource.data.members.size() <= 50;
+      allow update: if signedIn()
+        && str(request.resource.data.name, 60)
+        && request.resource.data.members is map
+        && request.resource.data.members.size() <= 50
+        && str(request.resource.data.currency, 3);
+      allow delete: if false;                     // groups are never hard-deleted from the app
+
+      match /expenses/{expenseId} {
+        allow read: if signedIn();
+        allow create, update: if signedIn()
+          && request.resource.data.type in ['expense', 'payment']
+          && request.resource.data.baseTotal is int
+          && request.resource.data.amount is int
+          && (request.resource.data.type == 'payment' || str(request.resource.data.desc, 80))
+          && request.resource.data.size() <= 40;
+        allow delete: if false;                   // the app soft-deletes so mistakes can be undone
+      }
+    }
+  }
+}
