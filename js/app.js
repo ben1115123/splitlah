@@ -1,7 +1,7 @@
 import * as L from './logic.js';
 import { createStore, newId } from './store.js';
 
-const VERSION = '1.1.1';
+const VERSION = '1.1.2';
 const $ = (s, r = document) => r.querySelector(s);
 const app = $('#app');
 const sheetRoot = $('#sheet-root');
@@ -172,7 +172,16 @@ function back(parent) {
   else location.replace(parent);
 }
 let lastHash = location.hash || '#/';
-window.addEventListener('hashchange', () => { S.prevHash = lastHash; lastHash = location.hash || '#/'; route(); });
+// Browsers announce the Back step differently: some send 'hashchange', some only 'popstate'
+// (e.g. when the address also loses its ?g= part, or goes to a page with no # at all).
+// Listen to both, and redraw once per real change of screen.
+function onNavigate() {
+  const h = location.hash || '#/';
+  if (h === lastHash) return;
+  S.prevHash = lastHash; lastHash = h; route();
+}
+window.addEventListener('hashchange', onNavigate);
+window.addEventListener('popstate', onNavigate);
 
 // Keep ?g=<id> in the address while a group is open. If someone taps
 // "Add to Home Screen" here, the installed app opens straight into this group
@@ -205,6 +214,7 @@ function route() {
 
 function renderRoute() {
   const r = S.route;
+  S.showingMissingExpense = false;
   app.oninput = app.onchange = null;
   if (r.gid && S.missing) return renderMissing();
   ({
@@ -220,7 +230,7 @@ function renderBoot() { PAGE = {}; app.innerHTML = '<div class="boot"><div class
 /* ============================== data subscription ============================== */
 function unwatchGroup() {
   S.unsubs.forEach((u) => { try { u(); } catch {} });
-  Object.assign(S, { loadError: null, unsubs: [], gid: null, group: null, expenses: [], gLoaded: false, eLoaded: false, missing: false, pending: false });
+  Object.assign(S, { loadError: null, showingMissing: false, unsubs: [], gid: null, group: null, expenses: [], gLoaded: false, eLoaded: false, missing: false, pending: false });
 }
 function watchGroup(gid) {
   if (S.gid === gid) return;
@@ -241,10 +251,13 @@ function onData() {
   if (S.group) cacheSummary();
   if (S.awaitingData) { S.awaitingData = false; renderRoute(); return; }
   if (S.missing) return renderMissing();
+  // The group or expense turned up after a "not found" screen was shown (e.g. a slow first load): draw the real screen.
+  if (S.showingMissing || S.showingMissingExpense) { S.showingMissing = S.showingMissingExpense = false; renderRoute(); return; }
   const v = S.route.view;
   if (v === 'group') liveUpdateGroup();
   else if (v === 'expense') renderExpenseDetail(S.route.arg, true);
   else if (v === 'settings') refreshSettingsMembers();
+  else if (v === 'settle' && !S.settleTouched && !sheetRoot.innerHTML) renderSettle(); // keep suggestions current until you start typing
   checkIdentity();
 }
 
@@ -406,7 +419,13 @@ async function joinGroup(gid) {
 function renderJoin() {
   PAGE = {
     back: () => back('#/'),
-    paste: async () => { try { $('#code').value = await navigator.clipboard.readText(); } catch { toast('Paste it into the box'); } },
+    paste: async () => {
+      let text = '';
+      try { text = (await navigator.clipboard.readText()).trim(); } catch { return toast('Long-press the box and choose Paste'); }
+      if (!text) return toast('Nothing copied yet — copy the invite link first');
+      $('#code').value = text;
+      if (!extractGroupId(text)) toast('That doesn’t look like a SplitLah link');
+    },
     join: async (el) => {
       const gid = extractGroupId($('#code').value);
       if (!gid) return toast('That doesn’t look like a SplitLah link');
@@ -423,6 +442,7 @@ function renderJoin() {
 }
 
 function renderMissing() {
+  S.showingMissing = true;
   PAGE = { home: () => location.replace('#/'), forget: () => { forgetGroup(S.route.gid); location.replace('#/'); } };
   app.innerHTML = `<div class="top"><button class="icon-btn" data-act="home" aria-label="Home">${ICON.back}</button><h1>Group</h1></div>
     <div class="empty"><div class="big-emoji">🔍</div><h3>Can’t open this group</h3>
@@ -447,7 +467,7 @@ function heroHTML() {
     <div class="label">${label}</div>
     <div class="big num ${mine > 0 ? 'bal-pos' : mine < 0 ? 'bal-neg' : ''}">${mine ? money(Math.abs(mine), cur) : '🎉'}</div>
     <div class="stats"><span>Group spend <b class="num">${money(stats.total, cur)}</b></span>
-      <span>Your share <b class="num">${money(stats.share[me] ?? 0, cur)}</b></span><span><b>${count}</b> expenses</span></div>
+      <span>Your share <b class="num">${money(stats.share[me] ?? 0, cur)}</b></span><span><b>${count}</b> expense${count === 1 ? '' : 's'}</span></div>
     ${S.pending ? '<div class="hint">⏳ Syncing your latest changes…</div>' : ''}
     <div class="hero-actions"><button class="btn sm" data-act="settle">💸 Settle up</button><button class="btn sm" data-act="share">${ICON.share.replace('<svg', '<svg width="16" height="16"')} Invite</button></div>
   </div>`;
@@ -596,7 +616,7 @@ function installBanner() {
   if (standalone || LS.get('splitlah.hideInstall', false)) return '';
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
   const how = ios ? 'Tap <b>Share</b> → <b>Add to Home Screen</b>' : S.installEvt ? '<button class="link-btn" data-act="install" style="padding:0">Add to home screen</button>' : 'Browser menu → <b>Add to Home screen</b>';
-  return `<div class="banner info" id="install-banner"><span>📲</span><div style="flex:1">${how} to keep this group one tap away.</div><button class="link-btn" data-act="hideInstall" style="padding:0 2px" aria-label="Dismiss">✕</button></div>`;
+  return `<div class="banner info" id="install-banner"><span>📲</span><div style="flex:1">${how} to keep this group one tap away.</div><button class="link-btn tap" data-act="hideInstall" aria-label="Dismiss">✕</button></div>`;
 }
 function liveUpdateGroup() {
   const hero = $('#hero'); const tabc = $('#tabc');
@@ -626,7 +646,7 @@ async function shareGroup(gid, name, fresh = false) {
 function renderExpenseForm(eid) {
   const g = S.group; const base = g.currency; const ms = members(); const me = myId();
   const editing = eid ? S.expenses.find((e) => e.id === eid && e.type !== 'payment') : null;
-  if (eid && !editing) return location.replace(`#/g/${S.gid}`);
+  if (eid && !editing) return renderMissingExpense();
   const lastCur = LS.get('splitlah.lastCur', {})[S.gid];
   const f = editing ? {
     desc: editing.desc, amountStr: L.minorToInput(editing.amount, editing.currency), currency: editing.currency,
@@ -996,7 +1016,7 @@ async function getRate(from, to) {
 function renderExpenseDetail(eid, isLive = false) {
   const e = S.expenses.find((x) => x.id === eid);
   const g = S.group; const base = g.currency; const me = myId();
-  if (!e) { if (!isLive) location.replace(`#/g/${S.gid}`); else renderMissingExpense(); return; }
+  if (!e) return renderMissingExpense();
   const y = isLive ? window.scrollY : 0;
   PAGE = {
     back: () => back(`#/g/${S.gid}`),
@@ -1040,12 +1060,14 @@ function renderExpenseDetail(eid, isLive = false) {
   if (isLive) window.scrollTo(0, y);
 }
 function renderMissingExpense() {
+  S.showingMissingExpense = true;
   PAGE = { back: () => location.replace(`#/g/${S.gid}`) };
-  app.innerHTML = `<div class="top"><button class="icon-btn" data-act="back">${ICON.back}</button><h1>Expense</h1></div><div class="empty"><h3>This item no longer exists</h3></div>`;
+  app.innerHTML = `<div class="top"><button class="icon-btn" data-act="back" aria-label="Back">${ICON.back}</button><h1>Expense</h1></div><div class="empty"><h3>This item no longer exists</h3><p>It may have been removed, or it’s still loading.</p></div>`;
 }
 
 /* ============================== SETTLE UP ============================== */
 function renderSettle() {
+  S.settleTouched = false;
   const g = S.group; const base = g.currency; const me = myId(); const q = S.route.q;
   const ms = members();
   const editing = q.get('edit') ? S.expenses.find((e) => e.id === q.get('edit') && e.type === 'payment') : null;
@@ -1060,6 +1082,7 @@ function renderSettle() {
   const personChips = (key) => ms.map((m) => `<button type="button" class="chip" data-act="${key}" data-id="${esc(m.id)}" aria-pressed="${f[key] === m.id}">${avatar(m.id, m.name, 'sm')}${esc(m.id === me ? 'You' : m.name)}</button>`).join('');
   const check = () => {
     const amt = L.toMinor(f.amountStr, base);
+    app.querySelectorAll('[data-act="sugg"]').forEach((c) => c.setAttribute('aria-pressed', c.dataset.from === f.from && c.dataset.to === f.to && Number(c.dataset.amt) === amt));
     const ok = f.from && f.to && f.from !== f.to && Number.isFinite(amt) && amt > 0;
     $('#save').disabled = !ok;
     $('#who').textContent = f.from && f.to && f.from !== f.to ? `${youOr(f.from, true)} ${f.from === me ? 'pay' : 'pays'} ${youOr(f.to)}${ok ? ' ' + money(amt, base) : ''}` : 'Pick two different people';
@@ -1067,9 +1090,10 @@ function renderSettle() {
   };
   PAGE = {
     back: () => back(editing ? `#/g/${S.gid}/e/${editing.id}` : `#/g/${S.gid}`),
-    from: (el) => { f.from = el.dataset.id; app.querySelectorAll('[data-act="from"]').forEach((b) => b.setAttribute('aria-pressed', b === el)); check(); },
-    to: (el) => { f.to = el.dataset.id; app.querySelectorAll('[data-act="to"]').forEach((b) => b.setAttribute('aria-pressed', b === el)); check(); },
+    from: (el) => { S.settleTouched = true; f.from = el.dataset.id; app.querySelectorAll('[data-act="from"]').forEach((b) => b.setAttribute('aria-pressed', b === el)); check(); },
+    to: (el) => { S.settleTouched = true; f.to = el.dataset.id; app.querySelectorAll('[data-act="to"]').forEach((b) => b.setAttribute('aria-pressed', b === el)); check(); },
     sugg: (el) => {
+      S.settleTouched = true;
       Object.assign(f, { from: el.dataset.from, to: el.dataset.to, amountStr: L.minorToInput(Number(el.dataset.amt), base) });
       app.querySelectorAll('[data-act="from"]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.id === f.from));
       app.querySelectorAll('[data-act="to"]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.id === f.to));
@@ -1096,7 +1120,7 @@ function renderSettle() {
   };
   app.innerHTML = `
     <div class="top"><button class="icon-btn" data-act="back" aria-label="Back">${ICON.close}</button><h1>${editing ? 'Edit settlement' : 'Settle up'}</h1></div>
-    ${!editing && suggestions.length ? `<div class="section-title">Suggested</div><div class="chips" style="margin-bottom:6px">${suggestions.map((t) => `<button class="chip" data-act="sugg" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount}">${esc(youOr(t.from, true))} → ${esc(youOr(t.to))} <span class="num">${money(t.amount, base)}</span></button>`).join('')}</div>` : ''}
+    ${!editing && suggestions.length ? `<div class="section-title">Suggested</div><div class="chips" style="margin-bottom:6px">${suggestions.map((t) => `<button class="chip" data-act="sugg" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amt="${t.amount}" aria-pressed="false">${esc(youOr(t.from, true))} → ${esc(youOr(t.to))} <span class="num">${money(t.amount, base)}</span></button>`).join('')}</div>` : ''}
     <div class="field" style="margin-top:14px"><div class="label">Who paid</div><div class="chips scroll">${personChips('from')}</div></div>
     <div class="field"><div class="label">Paid to</div><div class="chips scroll">${personChips('to')}</div></div>
     <div class="field"><label for="amt">Amount (${esc(base)})</label><input id="amt" class="input amount-input num" inputmode="decimal" data-in="amt" value="${esc(f.amountStr)}" placeholder="0.00"></div>
@@ -1104,7 +1128,7 @@ function renderSettle() {
     <div class="field"><label for="notes">Note (optional)</label><input id="notes" class="input" maxlength="200" data-in="notes" placeholder="e.g. DuitNow transfer" value="${esc(f.notes)}"></div>
     <div class="card" style="text-align:center;font-weight:700" id="who"></div>
     <div class="sheet-foot"><button id="save" class="btn primary block" data-act="save">${editing ? 'Save' : 'Record payment'}</button></div>`;
-  app.oninput = onInput((k, el) => { if (k === 'amt') { f.amountStr = el.value; check(); } else if (k === 'date') f.date = el.value; else if (k === 'notes') f.notes = el.value; });
+  app.oninput = onInput((k, el) => { S.settleTouched = true; if (k === 'amt') { f.amountStr = el.value; check(); } else if (k === 'date') f.date = el.value; else if (k === 'notes') f.notes = el.value; });
   app.onchange = null;
   check();
 }
@@ -1240,6 +1264,7 @@ async function boot() {
     }
   }
   window.__splitlahBooted = true;
+  if (!location.hash) { history.replaceState(history.state, '', location.pathname + location.search + '#/'); lastHash = '#/'; }
   route();
 }
 boot();

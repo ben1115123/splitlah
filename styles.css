@@ -272,3 +272,9 @@ textarea.input { min-height: 72px; resize: vertical; }
   .sheet.small { left: 50%; right: auto; width: 560px; transform: translateX(-50%); bottom: 24px; border-radius: 22px; animation: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* Bigger tap areas (≥44px) without changing how small controls look */
+.link-btn { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.link-btn.tap { min-width: 44px; margin: -12px -10px -12px 0; font-size: 16px; }
+.check { position: relative; }
+.check::before { content: ""; position: absolute; inset: -10px; }
